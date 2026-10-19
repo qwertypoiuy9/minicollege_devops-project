@@ -1,0 +1,98 @@
+pipeline {
+    agent any
+    
+    tools {
+        maven 'Maven3'  // You'll configure this in Jenkins
+        jdk 'Java21'    // You'll configure this in Jenkins
+    }
+    
+    environment {
+        DOCKER_IMAGE = 'minicollege-app'
+        DOCKER_TAG = '1.0.0'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        
+        stage('Build') {
+            steps {
+                sh 'mvn clean compile'
+            }
+        }
+        
+        stage('Unit Tests') {
+            steps {
+                sh 'mvn test'
+            }
+            post {
+                always {
+                    junit 'target/surefire-reports/*.xml'
+                }
+            }
+        }
+        
+        stage('Code Analysis - SonarQube') {
+            steps {
+                script {
+                    withSonarQubeEnv('SonarQube') {
+                        sh '''
+                            mvn sonar:sonar \
+                                -Dsonar.projectKey=minicollege \
+                                -Dsonar.projectName='MiniCollege' \
+                                -Dsonar.host.url=http://localhost:9000 \
+                                -Dsonar.login=${SONAR_TOKEN}
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Security Scan - Gitleaks') {
+            steps {
+                sh '''
+                    docker run --rm -v $WORKSPACE:/src zricethezav/gitleaks:latest detect -v -s /src || true
+                '''
+            }
+        }
+        
+        stage('Build Docker Image') {
+            steps {
+                sh "docker build -t ${DOCKER_IMAGE}:${DOCKER_TAG} ."
+            }
+        }
+        
+        stage('Vulnerability Scan - Trivy') {
+            steps {
+                sh '''
+                    docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+                        aquasec/trivy:latest image ${DOCKER_IMAGE}:${DOCKER_TAG} || true
+                '''
+            }
+        }
+        
+        stage('Deploy to Kubernetes') {
+            steps {
+                sh '''
+                    kubectl apply -f k8s/deployment.yaml || true
+                    kubectl rollout restart deployment/minicollege || true
+                '''
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo 'Pipeline completed'
+            cleanWs()
+        }
+        failure {
+            echo 'Pipeline failed - AI Agent will be triggered'
+            // Here you would trigger your Python AI agent via webhook
+            // sh 'curl -X POST http://localhost:8000/remediate -d "build_id=${BUILD_NUMBER}"'
+        }
+    }
+}
